@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Agent Town</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: system-ui, sans-serif;
+      background: #f4f1ea;
+      color: #222;
+    }
+    header {
+      padding: 12px 20px;
+      background: #2f3e46;
+      color: white;
+    }
+    header h1 { margin: 0; font-size: 22px; }
+    header p { margin: 4px 0 0; opacity: 0.8; font-size: 14px; }
+    main {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 16px;
+      padding: 16px;
+    }
+    #town {
+      background: #9ccc65;
+      border-radius: 8px;
+      max-width: 100%;
+      height: auto;
+      cursor: pointer;
+    }
+    #side {
+      flex: 1;
+      min-width: 260px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .controls button {
+      padding: 6px 12px;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    .card {
+      background: white;
+      border-radius: 8px;
+      padding: 10px 12px;
+      border-left: 6px solid gray;
+      cursor: pointer;
+      margin-bottom: 8px;
+    }
+    .card.selected { outline: 3px solid #2f3e46; }
+    .card h3 { margin: 0 0 4px; font-size: 16px; }
+    .card .role { font-size: 12px; opacity: 0.7; }
+    .card .doing { margin-top: 6px; font-size: 14px; }
+    #log {
+      background: white;
+      border-radius: 8px;
+      padding: 10px 12px;
+      height: 180px;
+      overflow-y: auto;
+      font-size: 13px;
+    }
+    #log div { margin-bottom: 4px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Agent Town</h1>
+    <p>Three agents go about their day. Click an agent (or its card) to follow it.</p>
+  </header>
+
+  <main>
+    <canvas id="town" width="900" height="560"></canvas>
+
+    <div id="side">
+      <div class="controls">
+        <button id="pause">Pause</button>
+        <label>Speed <input id="speed" type="range" min="0.5" max="4" step="0.5" value="1"></label>
+      </div>
+      <div id="cards"></div>
+      <div>
+        <strong>Activity log</strong>
+        <div id="log"></div>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    // ---------- The town ----------
+    // Agents walk along the roads. Every building has a "door" on a road.
+    const ROADS_Y = [180, 400];      // horizontal roads (centre lines)
+    const ROADS_X = [150, 450, 750]; // vertical roads (centre lines)
+
+    const places = {
+      library:  { name: "Library",     color: "#8d6e63", rect: [190, 40, 220, 110],  door: [300, 180] },
+      cafe:     { name: "Café",        color: "#ef9a9a", rect: [490, 40, 220, 110],  door: [600, 180] },
+      workshop: { name: "Workshop",    color: "#ffcc80", rect: [190, 220, 220, 140], door: [350, 400] },
+      park:     { name: "Park",        color: "#66bb6a", rect: [490, 220, 220, 140], door: [600, 400] },
+      post:     { name: "Post Office", color: "#90caf9", rect: [190, 440, 220, 100], door: [250, 400] },
+      market:   { name: "Market",      color: "#fff59d", rect: [490, 440, 220, 100], door: [650, 400] },
+      homeAda:  { name: "Ada's Home",  color: "#ce93d8", rect: [20, 40, 100, 110],   door: [70, 180] },
+      homeBo:   { name: "Bo's Home",   color: "#ffab91", rect: [780, 40, 100, 110],  door: [830, 180] },
+      homeCy:   { name: "Cy's Home",   color: "#80cbc4", rect: [20, 440, 100, 100],  door: [70, 400] },
+    };
+
+    // ---------- The agents ----------
+    // Each agent repeats a list of tasks: go to a place, then do something there for a while.
+    const agents = [
+      {
+        name: "Ada", role: "Researcher", color: "#7b1fa2",
+        tasks: [
+          { at: "library", doing: "Reading about how to build benches", seconds: 4 },
+          { at: "cafe",    doing: "Writing up her research notes",      seconds: 3 },
+          { at: "park",    doing: "Checking where a bench would fit",   seconds: 3 },
+          { at: "homeAda", doing: "Resting",                            seconds: 2 },
+        ],
+      },
+      {
+        name: "Bo", role: "Builder", color: "#e65100",
+        tasks: [
+          { at: "market",   doing: "Buying wood and nails",    seconds: 3 },
+          { at: "workshop", doing: "Building a bench",         seconds: 5 },
+          { at: "park",     doing: "Setting up the new bench", seconds: 3 },
+          { at: "homeBo",   doing: "Resting",                  seconds: 2 },
+        ],
+      },
+      {
+        name: "Cy", role: "Messenger", color: "#00796b",
+        tasks: [
+          { at: "cafe",     doing: "Picking up Ada's notes",   seconds: 2 },
+          { at: "workshop", doing: "Delivering notes to Bo",   seconds: 2 },
+          { at: "post",     doing: "Sorting the mail",         seconds: 3 },
+          { at: "homeCy",   doing: "Resting",                  seconds: 2 },
+        ],
+      },
+    ];
+
+    // Give every agent a starting position (its home) and an empty plan.
+    for (const agent of agents) {
+      const home = agent.tasks[agent.tasks.length - 1].at;
+      [agent.x, agent.y] = places[home].door;
+      agent.taskIndex = -1;  // -1 means "pick the first task next"
+      agent.path = [];       // points still to walk through
+      agent.waitLeft = 0;    // seconds left on the current activity
+      agent.status = "Waking up";
+    }
+
+    // ---------- Walking ----------
+    // Find a route along the roads from (x1, y1) to (x2, y2).
+    function routeBetween(x1, y1, x2, y2) {
+      if (y1 === y2) return [[x2, y2]]; // same road: walk straight there
+      // Otherwise use the vertical road that makes the shortest trip.
+      let best = ROADS_X[0];
+      for (const rx of ROADS_X) {
+        if (Math.abs(x1 - rx) + Math.abs(x2 - rx) < Math.abs(x1 - best) + Math.abs(x2 - best)) best = rx;
+      }
+      return [[best, y1], [best, y2], [x2, y2]];
+    }
+
+    function startNextTask(agent) {
+      agent.taskIndex = (agent.taskIndex + 1) % agent.tasks.length;
+      const task = agent.tasks[agent.taskIndex];
+      const [dx, dy] = places[task.at].door;
+      agent.path = routeBetween(agent.x, agent.y, dx, dy);
+      agent.status = "Walking to the " + places[task.at].name;
+    }
+
+    // Move every agent a little. Called many times per second.
+    const WALK_SPEED = 90; // pixels per second
+    function update(seconds) {
+      for (const agent of agents) {
+        if (agent.path.length > 0) {
+          // Walk toward the next point on the path.
+          const [tx, ty] = agent.path[0];
+          const dx = tx - agent.x, dy = ty - agent.y;
+          const dist = Math.hypot(dx, dy);
+          const step = WALK_SPEED * seconds;
+          if (dist <= step) {
+            agent.x = tx; agent.y = ty;
+            agent.path.shift();
+            if (agent.path.length === 0) {
+              // Arrived: start the activity.
+              const task = agent.tasks[agent.taskIndex];
+              agent.waitLeft = task.seconds;
+              agent.status = task.doing;
+              addLog(agent, task.doing + " at the " + places[task.at].name);
+            }
+          } else {
+            agent.x += (dx / dist) * step;
+            agent.y += (dy / dist) * step;
+          }
+        } else if (agent.waitLeft > 0) {
+          agent.waitLeft -= seconds;
+        } else {
+          startNextTask(agent);
+        }
+      }
+    }
+
+    // ---------- Drawing ----------
+    const canvas = document.getElementById("town");
+    const ctx = canvas.getContext("2d");
+    let selected = null; // the agent being followed, if any
+
+    function draw() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // Roads
+      ctx.fillStyle = "#b0aea6";
+      for (const y of ROADS_Y) ctx.fillRect(0, y - 20, canvas.width, 40);
+      for (const x of ROADS_X) ctx.fillRect(x - 20, 0, 40, canvas.height);
+
+      // Buildings
+      ctx.textAlign = "center";
+      ctx.font = "bold 15px system-ui";
+      for (const place of Object.values(places)) {
+        const [x, y, w, h] = place.rect;
+        ctx.fillStyle = place.color;
+        ctx.fillRect(x, y, w, h);
+        ctx.strokeStyle = "rgba(0,0,0,0.3)";
+        ctx.strokeRect(x, y, w, h);
+        ctx.fillStyle = "#222";
+        ctx.fillText(place.name, x + w / 2, y + h / 2 + 5);
+      }
+
+      // Agents
+      for (const agent of agents) {
+        ctx.beginPath();
+        ctx.arc(agent.x, agent.y, 12, 0, Math.PI * 2);
+        ctx.fillStyle = agent.color;
+        ctx.fill();
+        ctx.lineWidth = agent === selected ? 4 : 2;
+        ctx.strokeStyle = agent === selected ? "black" : "white";
+        ctx.stroke();
+        ctx.lineWidth = 1;
+        ctx.fillStyle = "white";
+        ctx.font = "bold 12px system-ui";
+        ctx.fillText(agent.name[0], agent.x, agent.y + 4);
+      }
+
+      // Speech bubbles with what each agent is doing (only the followed one, if any)
+      for (const agent of agents) {
+        if (selected === null || agent === selected) drawBubble(agent);
+      }
+    }
+
+    function drawBubble(agent) {
+      ctx.font = "12px system-ui";
+      const text = agent.name + ": " + agent.status;
+      const w = ctx.measureText(text).width + 12;
+      const x = Math.min(Math.max(agent.x - w / 2, 2), canvas.width - w - 2);
+      const y = agent.y - 40;
+      ctx.fillStyle = "rgba(255,255,255,0.92)";
+      ctx.fillRect(x, y, w, 20);
+      ctx.strokeStyle = agent.color;
+      ctx.strokeRect(x, y, w, 20);
+      ctx.fillStyle = "#222";
+      ctx.textAlign = "left";
+      ctx.fillText(text, x + 6, y + 14);
+      ctx.textAlign = "center";
+    }
+
+    // ---------- Side panel ----------
+    const cardsEl = document.getElementById("cards");
+    for (const agent of agents) {
+      const card = document.createElement("div");
+      card.className = "card";
+      card.style.borderLeftColor = agent.color;
+      card.innerHTML = `<h3>${agent.name}</h3><div class="role">${agent.role}</div><div class="doing"></div>`;
+      card.onclick = () => select(agent);
+      cardsEl.appendChild(card);
+      agent.card = card;
+    }
+
+    function updateCards() {
+      for (const agent of agents) {
+        agent.card.querySelector(".doing").textContent = agent.status;
+        agent.card.classList.toggle("selected", agent === selected);
+      }
+    }
+
+    function select(agent) {
+      selected = selected === agent ? null : agent; // click again to stop following
+    }
+
+    // Clicking on the map selects the nearest agent.
+    canvas.addEventListener("click", (event) => {
+      const box = canvas.getBoundingClientRect();
+      const x = (event.clientX - box.left) * (canvas.width / box.width);
+      const y = (event.clientY - box.top) * (canvas.height / box.height);
+      const hit = agents.find(a => Math.hypot(a.x - x, a.y - y) < 20);
+      selected = hit || null;
+    });
+
+    const logEl = document.getElementById("log");
+    function addLog(agent, text) {
+      const line = document.createElement("div");
+      line.innerHTML = `<strong style="color:${agent.color}">${agent.name}</strong> ${text}`;
+      logEl.prepend(line);
+      while (logEl.children.length > 50) logEl.lastChild.remove();
+    }
+
+    // ---------- Controls and main loop ----------
+    let paused = false;
+    document.getElementById("pause").onclick = (e) => {
+      paused = !paused;
+      e.target.textContent = paused ? "Play" : "Pause";
+    };
+    const speedEl = document.getElementById("speed");
+
+    let last = performance.now();
+    function loop(now) {
+      const seconds = Math.min((now - last) / 1000, 0.1);
+      last = now;
+      if (!paused) update(seconds * Number(speedEl.value));
+      draw();
+      updateCards();
+      requestAnimationFrame(loop);
+    }
+    requestAnimationFrame(loop);
+  </script>
+</body>
+</html>
